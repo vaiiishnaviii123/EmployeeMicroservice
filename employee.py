@@ -16,20 +16,24 @@ app = Flask(__name__)
 s3_client = boto3.client('s3')
 s3 = boto3.resource('s3')
 my_bucket = s3.Bucket("employeeprofilephotos")
-ALLOWED_EXTENSIONS = {'jpeg', 'png', 'jpg'}
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 
 dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
 db_table = dynamodb.Table('employee')
+
 date_format = '%m-%d-%y'
+
+# Session config
 app.secret_key = 'random secret'
 app.config['SESSION_COOKIE_NAME'] = 'google-login-session'
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(minutes=5)
+
 # oAuth Setup
 oauth = OAuth(app)
 google = oauth.register(
     name='google',
-    client_id='289040712545-gglis02d8v0em9f3fbonim8699gdb9et.apps.googleusercontent.com',
-    client_secret='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',
+    client_id='787984224372-t56fhi955jd0ie9c25849dtg5pc0muh2.apps.googleusercontent.com',
+    client_secret='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',
     access_token_url='https://accounts.google.com/o/oauth2/token',
     access_token_params=None,
     authorize_url='https://accounts.google.com/o/oauth2/auth',
@@ -55,9 +59,6 @@ def authorize():
     token = google.authorize_access_token()  # Access token from google (needed to get user info)
     resp = google.get('userinfo', token=token)  # userinfo contains stuff u specificed in the scrope
     user_info = resp.json()
-    # user = oauth.google.userinfo()  # uses openid endpoint to fetch user info
-    # Here you use the profile/user data that you got and query your database find/register the user
-    # and set ur own data in the session not the profile from google
     session['profile'] = user_info
     session.permanent = True  # make the session permanant so it keeps existing after broweser gets closed
     return redirect('/')
@@ -69,13 +70,15 @@ def allowed_file(filename):
 
 
 @app.route("/peoplesuite/apis/employee/<int:employeeId>/photo", methods=['POST', 'GET'])
+@login_required
 def employeePhoto(employeeId):
     print('inside here')
     if request.method == 'GET':
         try:
             empId = employeeId
+            if len(str(empId)) != 7:
+                return 'Employee Id should be a 7 digit number'
             # Get the file from the S3 Bucket created
-            my_bucket = s3.Bucket("employeeprofilephotos")
             for file in my_bucket.objects.filter(Prefix=str(empId)):
                 file_name = file.key
                 print(file.key)
@@ -94,67 +97,87 @@ def employeePhoto(employeeId):
             print('The S3 objects does not exist in the S3 bucket.')
             print(e)
     else:
-        if request.method == 'POST':
-            # print('inside here 1')
-            # print(type(employeeId))
-            # print(request.files['file'])
-            # print(request.files['file'].filename)
-            # check if the post request has the file part
-            file = request.files['file']
-            filename = request.files['file'].filename
-            # if user does not select file, browser also
-            # submit an empty part without filename
-            # if file and allowed_file(file.filename):
-            fileExtension = filename.rsplit('.', 1)[1]
+        print('inside here')
+        if 'file' not in request.files:
+            return 'Please attach file'
+        file = request.files['file']
+        # if user does not select file, browser also
+        # submit an empty part without filename
+        if file.filename == '':
+            return 'Please select a file'
+        if file and allowed_file(file.filename):
+            fileExtension = file.filename.rsplit('.', 1)[1]
             print(fileExtension)
             fileName = str(employeeId) + '.' + fileExtension
+            filename = secure_filename(file.filename)
             print(fileName)
-            print(type(fileName))
-            s3_client.upload_fileobj(file, 'employeeprofilephotos', fileName)
-            return "File uploaded successfully!!"
+            my_bucket.upload_fileobj(file, fileName)
+        return "File uploaded successfully!!"
 
 
-@app.route("/peoplesuite/apis/employees/<int:employeeId>/profile", methods=['GET', 'POST'])
-# @login_required
-def employeeProfile(employeeId):
-    if request.method == 'POST':
-        empId = employeeId
-        print('inside save profile')
-        print(request.data)
-        data = json.loads(request.data.decode('utf-8'))
-        print(data)
-        data['employeeId'] = empId
-        db_table.put_item(Item=data)
-        return 'Employee Profile added successfully.'
-    elif request.method == 'GET':
-        print('inside get profile')
-        response = db_table.get_item(
-            Key={'employeeId': employeeId}
-        )
-        print(response)
-        item = response['Item']
-        return item
+@app.route("/peoplesuite/apis/employees/<int:employeeId>/profile", methods=['GET'])
+@login_required
+def getEmployeeProfile(employeeId):
+    print('inside get profile')
+    response = db_table.get_item(
+        Key={
+            'employeeId': employeeId,
+        }
+    )
+    item = response['Item']
+    print(item)
+    return item
+
+
+@app.route("/peoplesuite/apis/employees/<int:employeeId>/profile", methods=['POST'])
+@login_required
+def saveEmployeeProfile(employeeId):
+    print('inside get profile')
+    print(request.data)
+    data = json.loads(request.data.decode('utf-8'))
+    verify_request_data(data)
+    print(data)
+    # data['employeeId'] = random.randint(1000000, 9999999)
+    db_table.put_item(
+        Item=data
+    )
+    return 'Employee Profile added successfully.'
 
 
 @app.route("/peoplesuite/apis/employees", methods=['GET'])
-# @login_required
+@login_required
 def getEmployeesOfDepartment():
     depId = request.args.get('departmentId')
     print('inside get employee profile on departmentId', depId, type(depId))
+
     response = db_table.scan(FilterExpression=Attr('departmentID').eq(depId))
     data = response['Items']
+
     while 'LastEvaluatedKey' in response:
         response = db_table.scan(ExclusiveStartKey=response['LastEvaluatedKey'])
         data.extend(response['Items'])
+    print(data)
     return data
 
 
-@app.route("/")
+def verify_request_data(data):
+    if len(str(data['employeeId'])) != 7:
+        return 'Employee Id should be a 7 digit number'
+    if len(data['country']) > 3 or len(data['country']) < 2:
+        return 'Country code needs to be ISO 3166'
+    try:
+        if data['startDate'] != datetime.strptime(data['startDate'], "%m-%d-%Y").strftime('%m-%d-%Y'):
+            raise ValueError
+    except ValueError:
+        return "Incorrect data format, should be YYYY-MM-DD"
+
+
+@app.route("/peoplesuite/apis/employee/servicem")
 def hello_employee_service():
-    return "<p> Welcome to employee microservice</p>"
+    return "<p> Welcome to employee service</p>"
 
 
-@app.route("/health")
+@app.route("/peoplesuite/apis/employee/health")
 def health():
     return jsonify(
         status="Employee service UP and running"
@@ -162,4 +185,4 @@ def health():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=80)
+    app.run(host='0.0.0.0', port=5000)
